@@ -1,21 +1,22 @@
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
-import swifter
+# import swifter
 import pickle
 import time
+import sys
 import os
 from tqdm import tqdm
 from itertools import chain
 from datetime import timedelta
 from operator import itemgetter
-from sklearn.metrics import auc
 from sklearn.cluster import KMeans
 from geopy.distance import geodesic
 from scipy.ndimage import gaussian_filter
 from tslearn.clustering import TimeSeriesKMeans
 from tslearn.utils import to_time_series_dataset
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from sklearn.metrics import auc, mean_squared_error
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 
 # chunker function to chunk signal into subsets
@@ -169,7 +170,7 @@ def ts_clustering(X_train, stride, time_constant, n_cluster):
 
 def get_scores(segments, segments_wind, segments_location, stride=15, time_constant=60, n_cluster=10):
     # prepare signals
-    signals_mflow = [segment.mean(axis=1).to_numpy() for segment in segments]
+    signals_mflow = [segment.sum(axis=1).to_numpy() for segment in segments]
     signals_wind = [segment['effect'].to_numpy() for segment in segments_wind]
     signals_loc = [segment['distance'].to_numpy() for segment in segments_location]
     signals = [signals_mflow, signals_wind, signals_loc]
@@ -184,72 +185,144 @@ def get_scores(segments, segments_wind, segments_location, stride=15, time_const
             labels = estimator.predict(chunk)
             score.append(np.array([hash[label] for label in labels]))
         scores.append(score)
+        # def concurrent_function(estimator, hash, segment, stride, time_constant):
+        #     chunk = [chunker(segment, i, stride, time_constant) for i in range((len(segment)-time_constant)//stride)]
+        #     labels = estimator.predict(chunk)
+        #     return np.array([hash[label] for label in labels])
+        # score = []
+        # with ThreadPoolExecutor() as executor:
+        #     wait_for = []
+        #     for segment in signal:
+        #         future = executor.submit(concurrent_function, estimator, hash, segment, stride, time_constant)
+        #         wait_for.append(future)
+        #     for completed in as_completed(wait_for):
+        #         result = completed.result()
+        #         score.append(result)
+        # scores.append(score)
     return signals, scores, estimators
 
-def generate_initial_proba(segments, n_class, cluster_name):
-    # segments = list(chain.from_iterable(segments))
-    segments = [segment[0] for segment in segments]
-    unique, counts = np.unique(segments, return_counts=True)
-    proba = dict(zip(range(n_class), np.zeros((n_class, ))))
-    proba = {**dict(zip(range(n_class), np.zeros((n_class, )))), **dict(zip(unique, counts/len(segments)))}
-    # for k, v in dict(zip(unique, counts/len(segments))).items():
-    #     proba[k] = v
-    proba = map(itemgetter(1), sorted([(k, v) for k, v in proba.items()], key=itemgetter(0)))
-    return cluster_name, np.array(list(proba))
 
-def generate_hidden_matrix(segments, n_class, cluster_name):
-    seq_pairs, states = [], []
-    for segment in segments:
-        states.extend(list(segment))
-        seq_pairs.extend([segment[i:i+2] for i in range(len(segment)-1)])
-    states = set(states)
-    # distribution
-    unique, counts = np.unique(list(map(lambda pair: pair[1] - pair[0], seq_pairs)), return_counts=True)
-    counts = counts / np.sum(counts)
-    distribution = dict(zip(unique, counts))
-    # find next states
-    next_states = []
-    for group in map(lambda hidden_state: list(filter(lambda pair: pair[0] == hidden_state, seq_pairs)), states):
-        this_state = set(map(itemgetter(0), group))
-        if len(this_state) != 1: 
-            continue
-        else: 
-            this_state = list(this_state)[0]
-        next_state = list(map(itemgetter(1), group))
-        unique, counts = np.unique(next_state, return_counts=True)
-        proba = counts / len(next_state)
-        next_states.append((this_state, dict(zip(unique, proba))))
-    next_states = dict(next_states)
-    # build dataframe, must account for missing states
-    states = []
-    for this_state in range(n_class):
-        # all zero
-        next_state = dict(zip(range(n_class), np.zeros((n_class, ))))
-        if this_state in next_states:
-            # overwrite
-            next_state = {**next_state, **next_states[this_state]}
-        else:
-            next_state = {**next_state, **{(k + this_state): v for k, v in distribution.items() if 0 <= (k + this_state) <= n_class}}
-        states.append(pd.DataFrame(next_state, index=[this_state]))
-    states = pd.concat(states, sort=True)
-    return cluster_name, states.to_numpy()
+def generate_initial_proba(segments, param, n_class, cluster_name):
+    # # segments = list(chain.from_iterable(segments))
+    # segments = [segment[0] for segment in segments]
+    # unique, counts = np.unique(segments, return_counts=True)
+    # proba = dict(zip(range(n_class), np.zeros((n_class, ))))
+    # proba = {**dict(zip(range(n_class), np.zeros((n_class, )))), **dict(zip(unique, counts/len(segments)))}
+    # # for k, v in dict(zip(unique, counts/len(segments))).items():
+    # #     proba[k] = v
+    # proba = map(itemgetter(1), sorted([(k, v) for k, v in proba.items()], key=itemgetter(0)))
+    # return cluster_name, np.array(list(proba))
+    try:
+        segments = [segment[0][0][param] for segment in segments]
+    except IndexError:
+        segments = [segment[0][param] for segment in segments]
+    inits, cts = np.unique(segments, return_counts=True)
+    mtx = np.zeros((n_class, ))
+    np.put(mtx, inits, cts.astype(np.float64))
+    mtx /= np.sum(mtx)
+    return cluster_name, mtx
 
-def generate_observable_matrix(segments_hidden, segments_observable, n_class, cluster_name):
-    association = list(zip([s for segment in segments_hidden for s in segment], [s for segment in segments_observable for s in segment]))
-    association_df = []
-    for this_state in range(n_class):
-        class_association = dict(zip(range(n_class), np.zeros((n_class, ))))
-        class_members = list(filter(lambda z: z[0] == this_state, association))
-        if len(class_members) != 0:
-            evident_class_association = list(map(itemgetter(1), class_members))
-            unique, counts = np.unique(evident_class_association, return_counts=True)
-            class_association = {**class_association, **dict(zip(unique, counts/len(evident_class_association)))}
-        else:
-            # print('no association:', this_state)
-            pass
-        association_df.append(pd.DataFrame(class_association, index=[this_state]))
-    association_df = pd.concat(association_df, sort=True)
-    return cluster_name, association_df.to_numpy()
+
+def generate_hidden_matrix(segments, param, n_class, cluster_name):
+    # # find unique states and sequential pairs
+    # seq_pairs, states = [], []
+    # for segment in segments:
+    #     states.extend(list(segment))
+    #     seq_pairs.extend([segment[i:i+2] for i in range(len(segment)-1)])
+    # states = set(states)
+    # # find distribution proba, likeliness to move from current
+    # unique, counts = np.unique(list(map(lambda pair: pair[1] - pair[0], seq_pairs)), return_counts=True)
+    # counts = counts / np.sum(counts)
+    # distribution = dict(zip(unique, counts))
+    # # find proba to which state next, at what proba
+    # next_states = []
+    # for group in map(lambda hidden_state: list(filter(lambda pair: pair[0] == hidden_state, seq_pairs)), states):
+    #     this_state = set(map(itemgetter(0), group))
+    #     if len(this_state) != 1: 
+    #         continue
+    #     else: 
+    #         this_state = list(this_state)[0]
+    #     next_state = list(map(itemgetter(1), group))
+    #     unique, counts = np.unique(next_state, return_counts=True)
+    #     proba = counts / len(next_state)
+    #     next_states.append((this_state, dict(zip(unique, proba))))
+    # next_states = dict(next_states)
+    # # build transition matrix, must account for missing states
+    # states = []
+    # for this_state in range(n_class):
+    #     # all zero
+    #     next_state = dict(zip(range(n_class), np.zeros((n_class, ))))
+    #     if this_state in next_states:
+    #         # overwrite
+    #         next_state = {**next_state, **next_states[this_state]}
+    #     else:
+    #         # next_state = {**next_state, **{(k + this_state): v for k, v in distribution.items() if 0 <= (k + this_state) < n_class}}
+    #         next_state[this_state] = 1
+    #     states.append(pd.DataFrame(next_state, index=[this_state]))
+    # states = pd.concat(states, sort=True)
+    # return cluster_name, states.to_numpy()
+    try:
+        segments = [seg[:,param] for segment in segments for seg in segment]
+    except IndexError:
+        segments = [segment[:,param] for segment in segments]
+        pairs = []
+        for segment in segments:
+            if len(segment) < 2:
+                continue
+            pairs.extend(list(np.column_stack((segment[:-1:2], segment[1::2]))))
+        segments = np.array(pairs)
+    assoc, cts = np.unique(segments, axis=0, return_counts=True)
+    mtx = np.zeros((n_class, n_class))
+    for (r, c), p in zip(assoc, cts): mtx[r,c] = p
+    div = np.tile(np.sum(mtx, axis=1), (mtx.shape[1], 1)).T
+    div[div==0] = 1
+    mtx /= div
+    # fill diagonal
+    # for rc in np.where(np.sum(mtx, axis=1) == 0)[0]: mtx[rc,rc] = 1
+    return cluster_name, mtx
+
+
+def generate_observable_matrix(segments, param_hid, param_obs, n_class, cluster_name):
+    # flatten then zip
+    # association = list(zip([s for segment in segments_hidden for s in segment], 
+    #                        [s for segment in segments_observable for s in segment]))
+    # association_df = []
+    # for this_state in range(n_class):
+    #     # for every class, fill with initial zero proba
+    #     class_association = np.zeros((n_class, ))
+    #     # sift for this iteration
+    #     class_members = list(filter(lambda z: z[0] == this_state, association))
+    #     if len(class_members) != 0:
+    #         evident_class_association = list(map(itemgetter(1), class_members))
+    #         # get number of counts
+    #         unique, counts = np.unique(evident_class_association, return_counts=True)
+    #         # update proba
+    #         class_association[unique] = counts / len(evident_class_association)
+    #     else:
+    #         # print('no association:', this_state)
+    #         pass
+    #     association_df.append(pd.DataFrame([class_association], index=[this_state]))
+    # association_df = pd.concat(association_df, sort=True)
+    # return cluster_name, association_df.to_numpy()
+    try:
+        hiddens = np.array([[seg[:,param_hid],] for segment in segments for seg in segment])
+        observables = np.array([[seg[:,param_obs],] for segment in segments for seg in segment])
+    except IndexError:
+        hiddens = list(chain.from_iterable([segment[:,param_hid] for segment in segments]))
+        observables = list(chain.from_iterable([segment[:,param_obs] for segment in segments]))
+    # hidden = np.array(segments_hidden).flatten()
+    # observable = np.array(segments_observable).flatten()
+    hid_obs = np.column_stack((hiddens, observables))
+    assoc, cts = np.unique(hid_obs, axis=0, return_counts=True)
+    mtx = np.zeros((n_class, n_class))
+    for (r, c), p in zip(assoc, cts): mtx[r,c] = p
+    div = np.tile(np.sum(mtx, axis=1), (mtx.shape[1], 1)).T
+    div[div==0] = 1
+    mtx /= div
+    # fill diagonal
+    # for rc in np.where(np.sum(mtx, axis=1) == 0)[0]: mtx[rc,rc] = 1
+    return cluster_name, mtx
+
 
 # find datapoints cluster member
 def associate_to_cluster(data, centers):
@@ -260,6 +333,7 @@ def associate_to_cluster(data, centers):
     datapoint_labels = np.array([card[mask][0] for card, mask in zip(cluster_member_card, cluster_member_mask)])
     return datapoint_labels
     
+
 def get_cluster_member(score, cluster_centers):
     seg = np.array(score).T
     dist = np.array([np.linalg.norm(seg - center, axis=1) for center in cluster_centers]).T
@@ -267,6 +341,104 @@ def get_cluster_member(score, cluster_centers):
     mask = np.array([d == minim for d in dist.T]).T
     cluster_member = np.array([np.ones((mask.shape[0], )) * i for i in range(np.shape(cluster_centers)[0])]).T[mask]
     return cluster_member
+
+
+def create_dataset(n_cluster, scores, test_segment, est):
+    dataset = {i: [] for i in range(n_cluster)}
+    bgn = 0
+    for enum, score in enumerate(zip(*scores)):
+        if enum == test_segment:
+            continue
+        # segment points
+        seg = np.array(score).T
+        # find end then slice
+        end = bgn + seg.shape[0]
+        cluster_member = est.labels_[bgn:end]
+        # for every cluster
+        for i in range(n_cluster):
+            # get index 
+            sequence = np.where(cluster_member == i)[0]
+            # must be 2 or more
+            if sequence.shape[0] < 2:
+                continue
+            # cut sequence once leaving cluster
+            cuts = [0] + list(np.where(np.diff(sequence) != 1)[0] + 1) + [sequence.shape[0]]
+            for p0, p1 in zip(cuts[:-1], cuts[1:]):
+                p0, p1 = sequence[p0:p1][0], sequence[p0:p1][-1]+1
+                member = seg[p0:p1]
+                dataset[i].append(member)
+        # for next loop
+        bgn = end
+    # check for empty clusters
+    for k, v in dataset.items():
+        if len(v) == 0:
+            print(k, 'has no member')
+    return dataset
+
+
+def hmm_modelling(dataset, n_class, n_cluster, hidden_param, observable_param):
+    hmm = {}
+    pi, hidden, observable = [], [], []
+    with ThreadPoolExecutor() as executor:
+        wait_for_1, wait_for_2, wait_for_3 = [], [], []
+        for i in range(n_cluster):
+            wait_for_1.append(executor.submit(generate_initial_proba, dataset[i], hidden_param, n_class, i))
+            wait_for_2.append(executor.submit(generate_hidden_matrix, dataset[i], hidden_param, n_class, i))
+            wait_for_3.append(executor.submit(generate_observable_matrix, dataset[i], hidden_param, observable_param, n_class, i))
+        for f in as_completed(wait_for_1):
+            pi.append(f.result())
+        for f in as_completed(wait_for_2):
+            hidden.append(f.result())
+        for f in as_completed(wait_for_3):
+            observable.append(f.result())
+    pi = list(map(itemgetter(1), sorted(pi, key=itemgetter(0))))
+    hidden = list(map(itemgetter(1), sorted(hidden, key=itemgetter(0))))
+    observable = list(map(itemgetter(1), sorted(observable, key=itemgetter(0))))
+    for i, zipped in enumerate(zip(pi, hidden, observable)):
+        hmm[i] = zipped
+    return hmm
+
+
+def smoothen(inp, sig=1):
+    to_blur = gaussian_filter(inp.copy(), sigma=sig)
+    if len(to_blur.shape) > 1:
+        div = np.sum(to_blur, axis=1)
+        div[div==0] = 1
+        div = np.tile(div, (to_blur.shape[1], 1)).T
+    else:
+        div = np.sum(to_blur)
+    to_blur /= div
+    return to_blur
+
+
+def predict(scores, test_segment, est, hmm, sigma):
+    score = np.array([scores[i][test_segment] for i in range(3)])
+    cluster_member = est.predict(score.T)
+    # prepare for viterbi
+    level = cluster_member[0]
+    cluster_member_segments, one_level = [], [level]
+    for i in range(1, cluster_member.shape[0]):
+        if cluster_member[i] == level:
+            one_level.append(cluster_member[i])
+        else:
+            cluster_member_segments.append(one_level)
+            level = cluster_member[i]
+            one_level = [level]
+    if len(one_level) > 0:
+        cluster_member_segments.append(one_level)
+    # use viterbi
+    path, bgn = [], 0
+    for one_level in cluster_member_segments:
+        end = bgn + len(one_level)
+        pi, hidden, observable = hmm[one_level[0]]
+        pi = smoothen(pi, sig=sigma)
+        hidden = smoothen(hidden, sig=sigma)
+        observable = smoothen(observable, sig=sigma)
+        p, *_ = viterbi(pi, hidden, observable, scores[2][test_segment][bgn:end])
+        path.extend(p)
+        bgn = end
+    return cluster_member, path
+
 
 def viterbi(pi, a, b, obs):
     
@@ -303,65 +475,40 @@ def viterbi(pi, a, b, obs):
     return path, delta, phi
 
 
-def test_all_segments(scores, n_class, n_cluster=None, is_plot=False):
-    """
-    docstring
-    """
-    n_segment = len(scores[0])
-    print('number of segments:', n_segment, '\n')
-    paths = []
-    for test_segment in range(n_segment):
-
-        t0 = time.time()
-        # bias is for stretching/squeezing a particular axial space 
-        # to purposefully make points closer or away
-        # lower is closer
-        biases = [1, 1, 1]
-        # epsilon is minimum distance of outermost cluster point to the next unclustered point 
-        # to absorb as cluster member
-        epsilon = np.sqrt(8)
-
+def process_all_segments(save_as):
+    global n_cluster
+    with open(dataset_path, 'rb') as f:
+        ds = pickle.load(f)
+    indices, segments, segments_wind, segments_location = ds['index'], ds['bunker'], ds['wind'], ds['location']
+    signals, scores, estimators = get_scores(segments, segments_wind, segments_location, 
+                                             stride=stride,
+                                             time_constant=time_constant,
+                                             n_cluster=n_class)
+    results = []
+    for test_segment in tqdm(range(len(indices))):
+        print(f"\nprocessing segment #{test_segment}")
         # create datapoints, and apply bias
-        b = np.array([score for enum, score in enumerate(scores[0]) if enum != test_segment])
-        b = np.concatenate(b * biases[0])
-        w = np.array([score for enum, score in enumerate(scores[1]) if enum != test_segment])
-        w = np.concatenate(w * biases[1])
-        d = np.array([score for enum, score in enumerate(scores[2]) if enum != test_segment])
-        d = np.concatenate(d * biases[2])
+        b = np.concatenate([score for enum, score in enumerate(scores[0]) if enum != test_segment]) * biases[0]
+        w = np.concatenate([score for enum, score in enumerate(scores[1]) if enum != test_segment]) * biases[1]
+        d = np.concatenate([score for enum, score in enumerate(scores[2]) if enum != test_segment]) * biases[2]
         datapoints = np.array([b, w, d]).T
-
-        # find good number of cluster
-        if n_cluster is None:
-            n_cluster = 5
-            is_static_n_cluster = False
-        else:
-            is_static_n_cluster = True
-        infinite_breaker = 1000
-        cluster_quality_thresh = 1
         # k-means
         n_cluster_ = n_cluster
         cluster_centers = []
-        while True:
-            if n_cluster_ > infinite_breaker:
-                # print('optimum not found')
-                break
-            # create clusters, without noise points
-            est = KMeans(n_clusters=n_cluster_, n_jobs=-1)
-            est.fit(datapoints)
-            # inverse mean square error
-            dfunc = lambda i: np.linalg.norm(datapoints[est.labels_==i] - est.cluster_centers_[i], axis=1)
-            cluster_quality = np.array([dfunc(j) for j in range(n_cluster_)])
-            cluster_quality = n_class / np.array([np.mean(cq**2) for cq in cluster_quality])
-            # cluster labels accepted
-            accepted = cluster_quality >= cluster_quality_thresh
-            if not np.all(accepted) and not is_static_n_cluster:
-                # print(f"n_cluster: {n_cluster_}, minimum: {np.min(cluster_quality)}")
-                n_cluster_ += 5
-            else:
-                break
-        # print('\nnumber of clusters:', est.cluster_centers_.shape[0], '\n')
+        if n_cluster_ > infinite_breaker:
+            print('optimum not found')
+            break
+        # create clusters, without noise points
+        if centers is not None:
+            est = KMeans(n_clusters=n_cluster_, init=centers)
+        else:
+            est = KMeans(n_clusters=n_cluster_)
+        est.fit(datapoints)
+        # inverse mean square error
+        cluster_quality = [np.linalg.norm(datapoints[est.labels_==i] - est.cluster_centers_[i], axis=1) for i in range(n_cluster_)]
+        cluster_quality = n_class / np.array([np.mean(cq**2) for cq in cluster_quality])
+        print(f"n_cluster: {n_cluster_}, minimum: {np.min(cluster_quality)}")
         n_cluster = est.cluster_centers_.shape[0]
-
         # prepare for training
         dataset = {i: [] for i in range(n_cluster)}
         bgn = 0
@@ -380,36 +527,28 @@ def test_all_segments(scores, n_class, n_cluster=None, is_plot=False):
                 # must be 2 or more
                 if sequence.shape[0] < 2:
                     continue
-                ptr = sequence[0]
-                for idx in sequence[1:]:
-                    if idx - ptr != 1:
-                        # not adjacent
-                        i_member = seg[ptr:idx]
-                        if i_member.shape[0] > 1:
-                            # len is 2 or more
-                            dataset[i].append(i_member)
-                        ptr = idx
+                cuts = [0] + list(np.where(np.diff(sequence) != 1)[0] + 1) + [sequence.shape[0]]
+                for p0, p1 in zip(cuts[:-1], cuts[1:]):
+                    p0, p1 = sequence[p0:p1][0], sequence[p0:p1][-1]+1
+                    member = seg[p0:p1]
+                    dataset[i].append(member)
             bgn = end
         for k, v in dataset.items():
             if len(v) == 0:
                 print(k, 'has no member')
-
-        # create matrices
         # 0 bunker, 1 wind effect, 2 distance
         hidden_param = 0
         observable_param = 2
         # hidden: to be predicted
         # observable: input
-        hmm = {}
+        hmm2 = {}
         pi, hidden, observable = [], [], []
-        with ProcessPoolExecutor() as executor:
+        with ThreadPoolExecutor() as executor:
             wait_for_1, wait_for_2, wait_for_3 = [], [], []
             for i in range(n_cluster):
-                wait_for_1.append(executor.submit(generate_initial_proba, [seg[:, hidden_param] for seg in dataset[i]], n_class, i))
-                wait_for_2.append(executor.submit(generate_hidden_matrix, [seg[:, hidden_param] for seg in dataset[i]], n_class, i))
-                wait_for_3.append(executor.submit(generate_observable_matrix, [seg[:, hidden_param] for seg in dataset[i]], 
-                                                                              [seg[:, observable_param] for seg in dataset[i]], 
-                                                                              n_class, i))
+                wait_for_1.append(executor.submit(generate_initial_proba, dataset[i], hidden_param, n_class, i))
+                wait_for_2.append(executor.submit(generate_hidden_matrix, dataset[i], hidden_param, n_class, i))
+                wait_for_3.append(executor.submit(generate_observable_matrix, dataset[i], hidden_param, observable_param, n_class, i))
             for f in as_completed(wait_for_1):
                 pi.append(f.result())
             for f in as_completed(wait_for_2):
@@ -420,12 +559,8 @@ def test_all_segments(scores, n_class, n_cluster=None, is_plot=False):
         hidden = list(map(itemgetter(1), sorted(hidden, key=itemgetter(0))))
         observable = list(map(itemgetter(1), sorted(observable, key=itemgetter(0))))
         for i, zipped in enumerate(zip(pi, hidden, observable)):
-            hmm[i] = zipped
-
-        # get prediction path
-        # some var names are recycled
+            hmm2[i] = zipped
         score = np.array([scores[i][test_segment] for i in range(3)])
-        # cluster_member = get_cluster_member(score, est.cluster_centers_)
         cluster_member = est.predict(score.T)
         level = cluster_member[0]
         cluster_member_segments, one_level = [], [level]
@@ -438,38 +573,37 @@ def test_all_segments(scores, n_class, n_cluster=None, is_plot=False):
                 one_level = [level]
         if len(one_level) > 0:
             cluster_member_segments.append(one_level)
-        path, bgn = [], 0
+        path2, bgn = [], 0
         for one_level in cluster_member_segments:
             end = bgn + len(one_level)
-            # pi, hidden, observable = (gaussian_filter(p, sigma=0.5) for p in hmm[one_level[0]])
-            pi, hidden, observable = hmm[one_level[0]]
-            observable = gaussian_filter(observable, sigma=0.5)
+            pi, hidden, observable = hmm2[one_level[0]]
+            pi = smoothen(pi, sig=sigma)
+            hidden = smoothen(hidden, sig=sigma)
+            observable = smoothen(observable, sig=sigma)
             p, *_ = viterbi(pi, hidden, observable, scores[2][test_segment][bgn:end])
-            path.extend(p)
-            bgn = end  
-
-        # plot
-        if is_plot:
-            plt.ylabel('Cluster')
-            # plt.plot(cluster_member, color='k', linewidth=0.5)
-            plt.bar(range(len(cluster_member)), cluster_member, width=1, facecolor='grey', alpha=0.25)
-            plt.twinx()
-            plt.ylabel('Score')
-            plt.plot(score[hidden_param], label='FR');
-            plt.plot(score[observable_param], label='VS');
-            plt.xlabel('Sample')
-            plt.plot(path, label='PR');
-            plt.legend(loc='upper right');
-            plt.show();
-
-        # accuracy
+            path2.extend(p)
+            bgn = end
         auc_truth = auc(range(len(score[hidden_param])), score[hidden_param])
-        auc_pred = auc(range(len(path)), path)
+        auc_pred = auc(range(len(path2)), path2)
         auc_diff = (auc_pred - auc_truth) / auc_truth
-        print('# {:3.0f} | {:3.0f} seconds | {} clusters | off by: {:6.1f} %'.format(test_segment, 
-                                                                                     round(time.time()-t0), 
-                                                                                     n_cluster, 
-                                                                                     100 * auc_diff))
-        print()
-        paths.append((score[hidden_param], path))
-    return paths
+        mse = mean_squared_error(score[hidden_param], path2)
+        results.append([auc_diff, mse])
+    with open(save_as, 'wb') as f:
+        pickle.dump(results, f)
+    return results
+
+
+dataset_path = 'dataset_5s.pkl'
+n_class = 100
+stride = 3
+time_constant = 12
+biases = [1, 1, 1]
+n_cluster = 300
+infinite_breaker = 500
+cluster_quality_thresh = 0.5
+centers = None
+sigma = 1
+
+
+if __name__ == '__main__':
+    process_all_segments(sys.argv[1])
