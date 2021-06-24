@@ -172,3 +172,7 @@ Example below uses 10 as threshold from VS as OP.
 It is possible to convert score back to original unit dimension, as each score is the average time-series cluster center.  
 
 ![18_original_dimension.png](img/18_original_dimension.png)
+
+______
+
+### Singapore Institute of Technology (SIT)
