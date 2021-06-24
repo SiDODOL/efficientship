@@ -185,20 +185,31 @@ def get_scores(segments, segments_wind, segments_location, stride=15, time_const
             labels = estimator.predict(chunk)
             score.append(np.array([hash[label] for label in labels]))
         scores.append(score)
-        # def concurrent_function(estimator, hash, segment, stride, time_constant):
-        #     chunk = [chunker(segment, i, stride, time_constant) for i in range((len(segment)-time_constant)//stride)]
-        #     labels = estimator.predict(chunk)
-        #     return np.array([hash[label] for label in labels])
-        # score = []
-        # with ThreadPoolExecutor() as executor:
-        #     wait_for = []
-        #     for segment in signal:
-        #         future = executor.submit(concurrent_function, estimator, hash, segment, stride, time_constant)
-        #         wait_for.append(future)
-        #     for completed in as_completed(wait_for):
-        #         result = completed.result()
-        #         score.append(result)
-        # scores.append(score)
+    # def concurrent_function(sigs, std, tco, est, hsh):
+    #     # score = []
+    #     # for seg in signal:
+    #     #     chunk = [chunker(seg, i, std, tco) for i in range((len(seg)-tco)//std)]
+    #     #     labels = est.predict(chunk)
+    #     #     score.append(np.array([hsh[label] for label in labels]))
+    #     def sub_cf(s, d, t, e, h):
+    #         chunk = [chunker(s, i, d, t) for i in range((len(s)-t)//d)]
+    #         labels = e.predict(chunk)
+    #         return np.array([h[label] for label in labels])
+    #     score = []
+    #     with ThreadPoolExecutor() as exec:
+    #         wf = []
+    #         for sig in sigs:
+    #             wf.append(exec.submit(sub_cf, sig, std, tco, est, hsh))
+    #         for c in as_completed(wf):
+    #             score.append(c.result())
+    #     return score
+    # scores = []
+    # with ThreadPoolExecutor() as executor:
+    #     wait_for = []
+    #     for (estimator, hash), signal in zip(estimators, signals):
+    #         wait_for.append(executor.submit(concurrent_function, signal, stride, time_constant, estimator, hash))
+    #     for completed in as_completed(wait_for):
+    #         scores.append(completed.result())
     return signals, scores, estimators
 
 
