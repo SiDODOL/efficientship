@@ -1,6 +1,30 @@
 # Efficient Harbor Craft Monitoring System: Time-Series Data Analytics and Machine Learning Tools to Achieve Fuel Efficiency by Operational Scoring System
 
+## Featured in OMAE2021-62658 Conference  
 
+The aim is to build a knowledge base (KB) for various activities of a harbor craft.  
+The harbor crafts used as subject is a 4,000 BHP ASD tugboat from which a six-month dataset were collected.  
+One use of the KB is to monitor hypothetical fuel usage by prediction.  
+
+An activity has a unique signature of parameters (i.e. speed and fuel usage).  
+For instance, cruising activity has different parameter measurements versus bollard pulling. 
+Both activities may use fuel at same rate, but their travelling speed widely differ. 
+
+To achieve the aim, Unsupervised Machine Learning (Clustering) is used.  
+It is in combination with stochastic modelling with Hidden Markov Model.  
+Together, they form a set of KB.  
+Prediction is carried out with Viterbi Algorithm.  
+
+Authors:  
+Dr. Zhi Yung Tay, Januwar Hadi, Dr. Dimitrios Konovessis, De Jin Loh (Singapore Institute of Technology)  
+David Tan Kong Hong (PACC Offshore Services)  
+Xiao-Bo Chen (Bureau Veritas)  
+
+---
+
+Below is the six-month dataset, cleaned and resampled.  
+The entire dataset appear in segments.  
+Each segment represent one tugboat job.  
 
 ![0_raw_data_all.png](img/0_raw_data_all.png)
 
@@ -55,9 +79,9 @@ All data (except `test_segment`) 3D scatter plot prior to clustering versus afte
 
 ![5_3d_points.png](img/5_3d_points.png)    ![6_datapoints_clustered.png](img/6_datapoints_clustered.png)
 
-The 3D scatter plot above (right) shows points associated to their clusters/colors (colors may be reused).  
+The 3D scatter plot above shows points associated to their clusters/colors (colors may be reused).  
 
-The clusters are acceepted once cluster quality value reaches certain value (e.g. ~1).  
+The clusters are accepted once cluster quality value reaches certain value (e.g. ~1).  
 If desired cluster quality has not been achieved, repeat or increase cluster size or both.  
 
 ![7_cluster_quality.png](img/7_cluster_quality.png)
@@ -124,7 +148,7 @@ Metrics are delta AUC (area under curve) and MSE (mean squared error).
 Delta AUC is the difference of prediction from ground truth in term of percentage (smaller better).  
 MSE is the average of squared difference of prediction from ground truth (smaller better). 
 
-The prediction from HMM model that uses WE as OP (left) vs VS as OP (right).  
+The prediction from HMM model that uses WE as OP (top) vs VS as OP (bottom).  
 
 ![14_predict_we_op.png](img/14_predict_we_op.png)   ![15_predict_vs_op.png](img/15_predict_vs_op.png)
 
@@ -135,7 +159,7 @@ The prediction from HMM model that uses WE as OP (left) vs VS as OP (right).
 Given an error threshold, any cluster associated to an error exceeding the threshold in the `test_segment` can be identified.  
 Therefore, it is possible to analyze the cluster shape and size.  
 
-Example below uses 10 as threshold.  
+Example below uses 10 as threshold from VS as OP.  
 
 ![16_error_analysis.png](img/16_error_analysis.png)
 
